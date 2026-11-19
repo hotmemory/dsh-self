@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "记忆指针注入",
+    "description": "把 hot.md 自动注入每个会话的系统提示，代理不主动读也能带上记忆。",
+    "detail": "docs/DETAIL.md"
+  }
+}

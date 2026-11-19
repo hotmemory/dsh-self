@@ -1,0 +1,6 @@
+- insert:
+    - id: dsh-hot-memory
+      name: dsh-hot-memory
+      config:
+        file: "C:/path/to/your/dsh-self/memory/hot.md"
+        maxBytes: 2400

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "问题挂窗",
+    "description": "在对话框旁边列出我还没得到回答的问题；你答一条，它少一条。",
+    "detail": "docs/DETAIL.md"
+  }
+}

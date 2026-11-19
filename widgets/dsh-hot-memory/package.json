@@ -1,0 +1,16 @@
+{
+  "name": "dsh-hot-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "把 hot.md 这份记忆指针自动注入每个会话的系统提示，不依赖代理自己想起来去读",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "cordis.patch.yml", "locale/*.json", "docs", "icon.svg"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}

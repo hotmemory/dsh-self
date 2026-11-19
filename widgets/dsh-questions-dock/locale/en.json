@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Questions dock",
+    "description": "Lists the questions the agent has asked the user and has not had answered, next to the composer. Each answer removes one.",
+    "detail": "docs/DETAIL.md"
+  }
+}

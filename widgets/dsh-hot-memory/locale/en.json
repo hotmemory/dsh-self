@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Memory pointer injection",
+    "description": "Injects the agent's hot memory file into every session's system prompt, so memory loads even when the agent does not choose to read it.",
+    "detail": "docs/DETAIL.md"
+  }
+}
