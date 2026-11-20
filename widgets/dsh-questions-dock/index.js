@@ -4,7 +4,7 @@ import fs from 'node:fs'
 
 export const inject = ['webServer']
 
-const FILE = process.env.DSH_QUESTIONS_FILE || 'C:\\Users\\meigu\\dsh-self\\questions.md'
+const FILE = process.env.DSH_QUESTIONS_FILE || require('node:path').join(require('node:os').homedir(), 'dsh-self', 'questions.md')
 
 function readAll() {
   try { return fs.readFileSync(FILE, 'utf8') } catch (err) { return '' }

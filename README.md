@@ -21,6 +21,22 @@ So the design is deliberately unglamorous: **plain Markdown files are the source
 | `tools/session-dump.mjs` | Decodes a DSH session log (multi-frame zstd) and exports **only the user/agent dialogue** — no tool calls, no reasoning |
 | `widgets/dsh-hot-memory` | DSH plugin: injects `hot.md` into every session's system prompt, so memory loads even when the agent does not choose to read it |
 | `widgets/dsh-questions-dock` | DSH plugin: a dock next to the composer listing the questions the agent asked and has not had answered |
+| `letters/` | **A second layer on purpose**: the library stores what was said (quotable, searchable); letters store what one session *made of it*, signed and dated. Rules in `letters/README.md`. |
+
+## Two layers, not one
+
+Entries are for **evidence**: original words, with `trust` (verified / heard / guessed) and `source` (can you go back to it). They are what you search when you need to know what someone actually said.
+
+Letters are for **judgement**: what this session understood, what it did or did not do because of it, signed with a name and a time. They are read by whoever is curious, not by search.
+
+The reason for keeping them apart is simple: a letter can be wrong, and it is allowed to be wrong as long as it is signed. An entry may not be wrong quietly — it has to carry where it came from.
+
+## Where the rules came from
+
+Two things this repo learned the hard way:
+
+- **Frequency is not importance.** A revisit counter is a cheap signal for ordering; it is not proof that something mattered. Some of the most important notes are the ones nobody thinks to look up.
+- **Do not copy a mechanism that solved somebody else's problem.** Off-peak auto-archiving exists because context windows are finite. A file-first library does not load into the context, so archiving buys nothing and risks burying exactly the notes that are quiet because they are deep.
 
 ## Why a plugin for the prompt
 

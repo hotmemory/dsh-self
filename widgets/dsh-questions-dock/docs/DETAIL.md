@@ -1,6 +1,6 @@
 # 问题挂窗
 
-把 `C:\Users\meigu\dsh-self\questions.md` 里状态为 `open` 的问题，挂在对话框旁边。
+把 `~/dsh-self/questions.md` 里状态为 `open` 的问题，挂在对话框旁边。
 
 - 点「答了」→ 我把状态改成 `answered`，这条从挂窗消失
 - 点「等我想好」→ `deferred`，暂时不显示；想回答就说一声，我改回 `open`

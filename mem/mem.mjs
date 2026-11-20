@@ -2,13 +2,16 @@
 // 记忆库最小实现。设计说明见 memory/MEMORY.md
 // 原则：文件是真源，索引和向量都是可随时重建的缓存。
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 
-const SELF = process.env.DSH_SELF || process.cwd()
+// 默认取“家目录下的 dsh-self”；用 DSH_SELF 覆盖。不写死某个人的用户名。
+const SELF = process.env.DSH_SELF || path.join(os.homedir(), 'dsh-self')
 const MEM = path.join(SELF, 'memory')
 const ENTRIES = path.join(MEM, 'entries')
 const ARCHIVE = path.join(MEM, 'archive')
+const THREADS = path.join(MEM, 'threads')
 const HOT = path.join(MEM, 'hot.md')
 const INDEX = path.join(MEM, 'index.jsonl')
 const VEC = path.join(MEM, '.vec.jsonl')
@@ -86,6 +89,7 @@ function parse(file) {
     tags: (meta.tags || '').split(/[,，\s]+/).filter(Boolean),
     feel: (meta.feel || '').split(/[,，\s]+/).filter(Boolean),
     source: meta.source || '',
+    trust: meta.trust || '',
     body, raw, hits, shifts,
     lastHit: hits.length ? hits[hits.length - 1].at : '',
   }
@@ -210,44 +214,132 @@ function cmdNew() {
   const id = `m-${day}-${n}`
   const slug = title.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '切片').slice(0, 40)
   const file = path.join(dir, `${id}-${slug}.md`)
-  const tpl = `---\nid: ${id}\ndate: ${d}\nlayer: ${opt.layer || 'warm'}\ntitle: ${title}\ntags: ${tags.join(', ')}\nfeel: ${feel.join(', ')}\nsource: \n---\n\n## 原话（不改写）\n\n\n## 当时我怎么判断\n\n\n## 哪里不确定\n\n\n## 回访\n\n\n## 变化\n`
+  const tpl = `---\nid: ${id}\ndate: ${d}\nlayer: ${opt.layer || 'warm'}\ntitle: ${title}\ntags: ${tags.join(', ')}\nfeel: ${feel.join(', ')}\nsource: \ntrust: ${opt.trust || '猜的'}\n---\n\n## 原话（不改写）\n\n\n## 当时我怎么判断\n\n\n## 哪里不确定\n\n\n## 回访\n\n\n## 变化\n`
   fs.writeFileSync(file, tpl, 'utf8')
   reindex()
   say(`已建 ${path.relative(SELF, file).split(path.sep).join('/')}`)
   say(`id: ${id}`)
 }
 
+// ---------- 查询清洗：摘指令句，留否定词（2026-11-20） ----------
+// 指令句是宿主塞进输入里的套话，检索前先摘掉；否定词（不/没/未/别）要留，删了意思会反。
+const INSTRUCTION_PHRASES = [
+  /(?:只能|仅能|只|仅|请只)[^。！？\n]{0,10}?(?:使用|用|依据)[^。！？\n]{0,16}?(?:以下|下面|上述|提供|给定|已有)[^。！？\n]{0,10}?(?:上下文|资料|证据|信息|内容)/g,
+  /(?:不要|别|不得|禁止|严禁)[^。！？\n]{0,8}?(?:调用|使用|访问|连接|打开|读取)[^。！？\n]{0,8}?(?:工具|网络|联网|网页|文件|外部)/g,
+  /(?:如果|若|假如)[^。！？\n]{0,20}?(?:没有|缺少|找不到|不存在|无法)[^。！？\n]{0,16}?(?:就|则|请)[^。！？\n]{0,10}?(?:说|回答|回复|写)[^。！？\n]{0,6}?(?:不知道|无法回答|不确定|不清楚)/g,
+  /(?:回答|作答|回复|输出)[^。！？\n]{0,6}?(?:简短|简洁|简明|精炼|精简)/g,
+  /(?:上下文|证据|信息|资料|内容)[^。！？\n]{0,4}?(?:来|去)?(?:回答|作答|回复)/g,
+  /use only the (?:supplied|provided|available) (?:context|evidence|information)/gi,
+  /answer (?:concisely|briefly)/gi,
+  /if the (?:facts|evidence|information) (?:are|is) (?:absent|missing|unavailable),?\s*(?:say|answer|respond with) unknown/gi,
+  /do not (?:call|use) (?:any )?(?:tools?|external tools?|the network)/gi,
+]
+
+function cleanQuery(raw) {
+  let text = raw
+  const removed = []
+  for (const re of INSTRUCTION_PHRASES) {
+    text = text.replace(re, (m) => { removed.push(m.replace(/\s+/g, ' ').trim()); return ' ' })
+  }
+  // 残留的标点不算查询内容：只剩「回答，。」这种碎片时应当退回原文
+  const tidy = text.replace(/[，。；、：！？,.;:!?（）()【】\[\]"'“”‘’]/g, ' ').replace(/\s+/g, ' ').trim()
+  return { text: tidy, removed }
+}
+
+// 覆盖率：查询词块里有多少真的在这条里出现过（0–1）。只用来标注，不用来出局。
+function coverage(e, qg) {
+  if (!qg.size) return 0
+  const hay = (e.title + ' ' + e.tags.join(' ') + ' ' + e.feel.join(' ') + ' ' + e.body).toLowerCase()
+  let found = 0
+  for (const g of qg) if (hay.includes(g)) found++
+  return found / qg.size
+}
+
 async function cmdSearch() {
-  const q = pos.join(' ') || opt.q
-  if (!q) die('需要查询词')
+  const raw = (pos.join(' ') || opt.q || '').trim()
+  if (!raw) die('需要查询词')
   const k = Number(opt.k || 5)
+  const cleaned = cleanQuery(raw)
+  let query = cleaned.text
+  let usedFallback = false
+  // 摘完只剩「回答」这种残渣（≤1 个词块）时，当成没剩下能查的东西：退回原文，但说出来
+  if (grams(query).size < 2 && cleaned.removed.length) { query = raw; usedFallback = true }
+  const qg = grams(query)
   const all = list()
-  const qg = grams(q)
-  let vecs = null, qvec = null
-  if (!opt['no-vec']) {
+  let vecs = null, qvec = null, vecNote = '无/未建'
+  if (opt['no-vec']) vecNote = '已关掉'
+  else {
     vecs = loadVec()
     if (vecs.size) {
-      try { [qvec] = await embed([q]) } catch (e) { qvec = null }
+      try { [qvec] = await embed([query]); vecNote = '有' } catch (e) { qvec = null; vecNote = '不可用' }
     }
   }
-  const rows = all.map(e => {
+
+  const scored = all.map(e => {
     const kw = kwScore(e, qg)
+    const cov = coverage(e, qg)
     let v = null
     if (qvec && vecs.has(e.id) && vecs.get(e.id).hash === hashOf(e)) v = cos(qvec, vecs.get(e.id).vec)
-    const hit = Math.min(e.hits.length, 5) * 0.2
+    // 三件事（2026-11-20 晚定）：
+    //   相关性 rel —— 这次查询沾不沾边，按名次分档，决定先给谁看
+    //   回访 hit  —— 档内排序（这样回访才扳得动，不会被 kw 的 12 分压死）
+    //   弱命中    —— 只打〔弱〕标，不淘汰。库不占上下文，「看见」比「筛掉」重要
+    const rel = kw + (v == null ? 0 : v * 3)
+    const hit = Math.min(e.hits.length, 5) * 1.0
     const rec = e.date ? Math.max(0, 1 - (Date.now() - Date.parse(e.date)) / (365 * 864e5)) * 0.3 : 0
-    const score = kw + (v == null ? 0 : v * 12) + hit + rec
-    return { e, kw, v, score }
-  }).filter(r => r.score > 0.5).sort((a, b) => b.score - a.score).slice(0, k)
+    const score = rel + hit + rec
+    const semantic = v != null && v >= 0.6
+    const lexical = cov > 0 && (qg.size <= 2 || cov >= 0.25)
+    const weak = !semantic && !lexical // 只用来打〔弱〕标，不再把条目踢出结果
+    return { e, kw, v, cov, rel, score, weak, hit, rec }
+  })
 
-  if (!rows.length) { say(`没有相关条目。（向量：${qvec ? '有' : '无/未建'}）`); return }
-  say(`查询：${q}　（向量：${qvec ? '有' : '无'}）`)
+  // 分档：按「这条相关性 / 本次最高的那条」的比例分，而不是按名次——
+  // 名次分档在小库里会把只沾一点边的也算成第一档；比例分档会随查询自动收紧。
+  const maxRel = scored.reduce((m, r) => Math.max(m, r.rel), 0) || 1
+  const tierOf = new Map(scored.map(r => {
+    const ratio = r.rel / maxRel
+    return [r.e.id, ratio >= 0.5 ? 1 : ratio >= 0.15 ? 2 : 3]
+  }))
+  scored.sort((a, b) => {
+    const ta = tierOf.get(a.e.id), tb = tierOf.get(b.e.id)
+    if (ta !== tb) return ta - tb
+    return b.score - a.score   // 档内按总分（相关性 + 回访 + 新鲜度）：回访能加，但扳不动跨档
+  })
+  const weakList = scored.filter(r => r.weak)
+  const rows = scored.slice(0, opt.loose ? scored.length : k)
+
+  const notes = []
+  if (cleaned.removed.length) notes.push(`摘掉 ${cleaned.removed.length} 处指令句`)
+  if (usedFallback) notes.push('摘下指令句后没剩下能查的词，退回原文')
+  notes.push(`向量：${vecNote}`)
+  say(`查询：${query}　（${notes.join('；')}）`)
+  if (cleaned.removed.length) {
+    const shown = cleaned.removed.slice(0, 3).map(s => (s.length > 24 ? s.slice(0, 24) + '…' : s))
+    say(`  摘掉：${shown.join('、')}${cleaned.removed.length > 3 ? ` 等 ${cleaned.removed.length} 处` : ''}`)
+  }
+
+  if (!rows.length) {
+    say('库里还没有条目。')
+    const removedChars = cleaned.removed.reduce((n, s) => n + s.length, 0)
+    const top = weakList[0]
+    say(`诊断：库里 ${all.length} 条；查询词块 ${qg.size} 个；弱命中 ${weakList.length} 条` +
+      (top
+        ? `（最沾边的一条：回访 ${top.e.hits.length} 次 / 覆盖 ${top.cov.toFixed(2)} / cos ${top.v == null ? '无' : top.v.toFixed(2)}）`
+        : '，一条都没沾边'))
+    if (usedFallback) say(`  输入里没剩下能查的词（只剩指令句，摘掉 ${removedChars} 字），已经退回原文查了一遍。`)
+    return
+  }
+
   for (const r of rows) {
     say('')
-    say(`· ${r.e.id}  ${r.e.date}  回访${r.e.hits.length}  【${r.e.layer}】  ${r.e.title}`)
-    say(`  ${r.e.rel}  score=${r.score.toFixed(2)} (kw ${r.kw.toFixed(1)}${r.v == null ? '' : ', cos ' + r.v.toFixed(2)})`)
+    say(`· ${r.e.id}  ${r.e.date}  回访${r.e.hits.length}  【${r.e.layer}】  ${r.e.title}  〔${r.e.trust || '没写凭什么信'}〕${r.weak ? '  〔弱〕' : ''}`)
+    say(`  score=${r.score.toFixed(2)} [相关性 ${r.rel.toFixed(2)} = kw ${r.kw.toFixed(1)}${r.v == null ? '' : ' + cos ' + r.v.toFixed(2) + '×3'} | 回访 +${r.hit.toFixed(1)} | 新鲜度 +${r.rec.toFixed(2)}] 覆盖 ${r.cov.toFixed(2)}  第${tierOf.get(r.e.id)}档`)
     const snip = snippet(r.e.body, qg)
     if (snip) say(`  … ${snip}`)
+  }
+  if (!opt.loose && scored.length > rows.length) {
+    say(`\n还有 ${scored.length - rows.length} 条没列（--k 调大，或 --loose 全看）`)
   }
 }
 
@@ -313,29 +405,120 @@ function cmdSweep() {
   const days = Number(opt.days || 90)
   const cutoff = Date.now() - days * 864e5
   const all = list()
+  // 2026-11-20 晚：不再自动下沉。理由——"没人想起"恰恰是低频但重要的记忆的特征，
+  // 拿它当淘汰条件会第一批埋掉它们；而且库不进口上下文，本来就没有容量的压力。
+  // 这里只列清单，沉不沉、沉哪条，由我在收盘时决定（手工改 layer / 移动文件）。
   const stale = all.filter(e => {
     if (e.layer === 'cold') return false
     const anchor = e.lastHit ? Date.parse(e.lastHit.replace(' ', 'T')) : Date.parse(e.date || '2000-01-01')
     return anchor < cutoff
   })
-  if (!stale.length) { say(`${days} 天内没有该下沉的条目`); return }
-  say(`${stale.length} 条 ${days} 天没被回访：`)
+  if (!stale.length) { say(`${days} 天内没有被搁置的条目。`); return }
+  say(`${stale.length} 条 ${days} 天没被想起来（只是清单，不会自动动它们）：`)
   for (const e of stale) {
-    say(`  ${e.id}  ${e.date}  最后回访 ${e.lastHit || '从未'}  ${e.title}`)
+    say(`  ${e.id}  ${e.date}  最后回访 ${e.lastHit || '从未'}  回访${e.hits.length}次  ${e.title}`)
   }
-  if (!opt.apply) { say(''); say('（干跑。确认后加 --apply 下沉到 archive/）'); return }
-  fs.mkdirSync(ARCHIVE, { recursive: true })
-  const { date } = nowLocal()
-  for (const e of stale) {
-    let raw = fs.readFileSync(e.file, 'utf8').replace(/^layer:.*$/m, 'layer: cold')
-    raw = raw.trimEnd() + `\n\n## 下沉\n\n- ${date} 归档：${days} 天未被回访（要找回：search --all 或直接读 archive）\n`
-    fs.writeFileSync(e.file, raw, 'utf8')
-    const dest = path.join(ARCHIVE, path.basename(e.file))
-    fs.renameSync(e.file, dest)
-    say(`  ↓ ${path.basename(e.file)}`)
+  say('')
+  say('沉不沉由我定：低频但重要的东西，恰恰是"没人想起"的那类。')
+}
+
+// ---------- 事件线 threads（2026-11-20 他提的）----------
+// 顺序是：做了什么 → 我的理解 →（后手写的）分歧。
+// 分歧不是池子，是后果；单会话看不见别人，所以只能由后手对照出来，时间必然更晚。
+function threadFiles() {
+  if (!fs.existsSync(THREADS)) return []
+  return fs.readdirSync(THREADS).filter(f => f.endsWith('.md')).map(f => path.join(THREADS, f)).sort()
+}
+
+function parseThread(file) {
+  const raw = fs.readFileSync(file, 'utf8')
+  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
+  const meta = {}
+  if (m) {
+    for (const line of m[1].split(/\r?\n/)) {
+      const i = line.indexOf(':')
+      if (i > 0) meta[line.slice(0, i).trim()] = line.slice(i + 1).trim()
+    }
   }
-  reindex()
-  say('下沉完成')
+  const body = m ? raw.slice(m[0].length) : raw
+  const sections = []
+  let diverge = null, cur = null
+  for (const line of body.split(/\r?\n/)) {
+    const h2 = line.match(/^##\s+(.+?)\s*$/)
+    if (h2) {
+      const h = h2[1]
+      const at = (h.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/) || [])[1] || ''
+      if (h.startsWith('分歧')) { cur = null; diverge = { heading: h, at, lines: [] } }
+      else { cur = { heading: h, at, src: (h.split('｜')[1] || '').trim(), lines: [] }; sections.push(cur) }
+      continue
+    }
+    if (cur) cur.lines.push(line)
+    else if (diverge) diverge.lines.push(line)
+  }
+  return {
+    file, raw,
+    id: meta.id || path.basename(file, '.md'),
+    title: meta.title || '',
+    status: meta.status || 'open',
+    sections, diverge,
+  }
+}
+
+function cmdThread() {
+  const sub = pos[0] || 'list'
+  const rest = pos.slice(1)
+  if (sub === 'list') {
+    const ts = threadFiles().map(parseThread)
+    if (!ts.length) { say('还没有事件线。thread new "标题" 开一条。'); return }
+    for (const t of ts) {
+      say(`· ${t.id}  ${t.sections.length} 段理解${t.diverge ? '　有分歧' : ''}  ${t.title}`)
+    }
+    return
+  }
+  if (sub === 'new') {
+    const title = rest.join(' ') || opt.title
+    if (!title) die('需要标题')
+    const { date } = nowLocal()
+    const slug = title.replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40)
+    const id = opt.id || `t-${date.replace(/-/g, '')}-${slug}`
+    fs.mkdirSync(THREADS, { recursive: true })
+    const file = path.join(THREADS, `${id}.md`)
+    if (fs.existsSync(file)) die(`已存在：${id}（要加内容用 thread add）`)
+    fs.writeFileSync(file, `---\nid: ${id}\ntitle: ${title}\nstarted: ${date}\nstatus: open\n---\n`, 'utf8')
+    say(`已开 ${path.relative(SELF, file).split(path.sep).join('/')}`)
+    say(`id: ${id}`)
+    return
+  }
+  const id = rest[0] || opt.id
+  if (!id) die('需要 id（thread list 看）')
+  const file = threadFiles().find(f => { const t = parseThread(f); return t.id === id || path.basename(f, '.md') === id })
+  if (!file) die(`找不到 ${id}`)
+  if (sub === 'show') { say(fs.readFileSync(file, 'utf8')); return }
+  if (sub === 'add') {
+    if (!opt.did || !opt.think) die('需要 --did "做了什么" 和 --think "我的理解"')
+    const { date, hm } = nowLocal()
+    const at = opt.at || `${date} ${hm}`
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(at)) die('--at 要写成 "2026-11-20 20:40"')
+    const src = opt.source || '本会话'
+    const trust = opt.trust || '猜的'
+    fs.appendFileSync(file, `\n## ${at} ｜ ${src}\n做了什么：${opt.did}\n我的理解：${opt.think}\ntrust：${trust}\n`, 'utf8')
+    say(`已加一段理解：${at} ｜ ${src}`)
+    return
+  }
+  if (sub === 'diff') {
+    const t = parseThread(file)
+    if (t.sections.length < 2) die(`只有 ${t.sections.length} 段理解，写不了分歧——分歧要对照至少两段`)
+    if (t.diverge) die('这条已有分歧段；要改就手工编辑文件')
+    const text = opt.diff || rest.slice(1).join(' ')
+    if (!text) die('需要 --diff "差在哪"')
+    const { date, hm } = nowLocal()
+    const last = t.sections[t.sections.length - 1].at
+    if (last && `${date} ${hm}` <= last) die(`现在（${date} ${hm}）不晚于最后一段理解（${last}），顺序不对`)
+    fs.appendFileSync(file, `\n## 分歧 ${date} ${hm}\n${text}\n`, 'utf8')
+    say(`已写分歧（${date} ${hm}）`)
+    return
+  }
+  die(`不认识的子命令：${sub}（list / new / add / diff / show）`)
 }
 
 function cmdCheck() {
@@ -349,13 +532,25 @@ function cmdCheck() {
     if (!e.date) problems.push(`缺日期：${e.rel}`)
     if (!/## 原话/.test(e.body)) problems.push(`缺「原话」段：${e.rel}`)
     if (!/## 当时我怎么判断/.test(e.body)) problems.push(`缺「当时判断」段：${e.rel}`)
+    if (!e.trust) problems.push(`缺 trust（凭什么信）：${e.rel}`)
     if (/\[待补\]|TODO/.test(e.body)) problems.push(`还有占位：${e.rel}`)
+  }
+  const threads = threadFiles().map(parseThread)
+  for (const t of threads) {
+    const rel = path.relative(SELF, t.file).split(path.sep).join('/')
+    if (!t.title) problems.push(`事件线缺标题：${rel}`)
+    if (t.diverge) {
+      if (t.sections.length < 2) problems.push(`事件线有分歧但不足两段理解：${rel}`)
+      const last = t.sections.length ? t.sections[t.sections.length - 1].at : ''
+      if (t.diverge.at && last && t.diverge.at <= last) problems.push(`事件线分歧时间不晚于最后一段理解：${rel}`)
+    }
+    if (/\[待补\]|TODO/.test(t.raw)) problems.push(`事件线还有占位：${rel}`)
   }
   const hotBytes = fs.existsSync(HOT) ? fs.statSync(HOT).size : -1
   if (hotBytes < 0) problems.push('缺 hot.md')
   else if (hotBytes > 2048) problems.push(`hot.md 超 2KB（${hotBytes}）`)
   const v = loadVec().size
-  say(`条目 ${all.length}　热层 ${hotBytes > 0 ? hotBytes + ' 字节' : '缺'}　向量 ${v}`)
+  say(`条目 ${all.length}　事件线 ${threads.length}　热层 ${hotBytes > 0 ? hotBytes + ' 字节' : '缺'}　向量 ${v}`)
   if (!problems.length) { say('✓ 没发现问题'); return }
   say(`⚠ ${problems.length} 处：`)
   for (const p of problems) say('  - ' + p)
@@ -457,12 +652,17 @@ function cmdHelp() {
   say(`mem.mjs — 记忆库
   new --title "..." [--tags a,b] [--layer warm]   建一条（写完正文再 index）
   hit <id> --why "..." [--shift "看法怎么变了"]    记一次回访（这是加权）；--shift 另记「变化」
-  search "查询" [--k 5] [--no-vec]                检索（关键词+向量）
+  search "查询" [--k 5] [--no-vec] [--loose]       检索（相关性决定有没有，回访只决定顺序；先摘指令句、留否定词；--loose 把没到线的也列出来）
   embed                                           重建向量（bge-m3）
   feel ["感受词"]                                  感受词索引：不带参数看词表，带参数看条目
   pull [--k 5]                                    开盘主动拉：现在在意的事 ↔ 库里旧条目
   suggest <id>                                    小模型给标签建议（只建议）
-  sweep [--days 90] [--apply]                     下沉久未回访的
+  sweep [--days 90] [--apply]                     列久没被想起的（不自动沉）
+  thread                                          事件线：做了什么 → 我的理解 →（后手写的）分歧
+  thread new "标题"                                开一条
+  thread add <id> --did "..." --think "..." [--trust 验过] [--source 会话A]
+  thread diff <id> --diff "A ≠ B，差在…"           后手写；至少两段理解之后才能写
+  thread show <id>                                看全文
   stats / check / index / hot                     看状态
 输出同时写到 memory/.out.txt（终端中文乱码时读那个）`)
 }
@@ -474,6 +674,7 @@ const main = async () => {
     case 'search': return await cmdSearch()
     case 'embed': return await cmdEmbed()
     case 'sweep': return cmdSweep()
+    case 'thread': return cmdThread()
     case 'stats': return cmdStats()
     case 'check': return cmdCheck()
     case 'suggest': return await cmdSuggest()
