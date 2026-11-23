@@ -2,3 +2,6 @@ node_modules/
 dumps/
 *.log
 .DS_Store
+
+# 原话存档是私人对话，不进公开仓库
+memory/raw/
