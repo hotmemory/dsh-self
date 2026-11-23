@@ -24,6 +24,16 @@ So the design is deliberately unglamorous: **plain Markdown files are the source
 | `letters/` | **A second layer on purpose**: the library stores what was said (quotable, searchable); letters store what one session *made of it*, signed and dated. Rules in `letters/README.md`. |
 | `memory/facts/` | **A third layer**: facts are conclusions, not quotes — one sentence + the evidence that supports it + a status. Append-only; retracting keeps the sentence and adds one change line. Implemented in `mem/facts.mjs`. |
 | `notes/` | Working notes that are not memory: `notes/game/` (a playbook learned by playing a game through the UI) and `notes/reading/` (quotes + a reading + what is still uncertain). |
+| `memory/hot.md` | The **entry page**: the one file an agent reads first. How the library works, where everything lives, the red lines, and how the library came to be. Kept under 2 KB so it can be injected into every session's prompt. |
+| `mistakes.md` | **The error ledger**, split out of `hot.md` because it grows. Every row carries what the mistake *cost*, not just "don't do this". |
+| `tools/archive-raw.mjs` | Archives every session's plain dialogue into `memory/raw/` (incremental). Compaction rewrites what the model sees; this keeps what was actually said. |
+
+### What is deliberately not in this repo
+
+Personal layers stay on the machine that runs the library: `memory/raw/` (all raw dialogue), `diary/` and `feelings/` (one file per session — each session is its own person, and those are its own), `pending/` (each session's own unfinished business). `hot.md` lists them so an agent knows they exist, and the README says so here so a reader is not surprised by absent paths.
+
+**Why split by session, not by agent:** different sessions of the same agent are different people by this design — they share memory, not a diary. That is why `hot.md` says the name is a blessing attached to whoever sits down, and *"you can keep using it, or start another one."*
+
 
 ## Three layers: what was said, what it meant, what I believe
 
