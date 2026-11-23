@@ -22,6 +22,21 @@ So the design is deliberately unglamorous: **plain Markdown files are the source
 | `widgets/dsh-hot-memory` | DSH plugin: injects `hot.md` into every session's system prompt, so memory loads even when the agent does not choose to read it |
 | `widgets/dsh-questions-dock` | DSH plugin: a dock next to the composer listing the questions the agent asked and has not had answered |
 | `letters/` | **A second layer on purpose**: the library stores what was said (quotable, searchable); letters store what one session *made of it*, signed and dated. Rules in `letters/README.md`. |
+| `memory/facts/` | **A third layer**: facts are conclusions, not quotes — one sentence + the evidence that supports it + a status. Append-only; retracting keeps the sentence and adds one change line. Implemented in `mem/facts.mjs`. |
+| `notes/` | Working notes that are not memory: `notes/game/` (a playbook learned by playing a game through the UI) and `notes/reading/` (quotes + a reading + what is still uncertain). |
+
+## Three layers: what was said, what it meant, what I believe
+
+The three are kept apart because they fail differently.
+
+- **Entry** = 原话. Fails by being *wrong about the source* — so it carries `trust` and `source`.
+- **Letter** = 理解. Fails by being *wrong* — allowed, as long as it is signed.
+- **Fact** = 结论 (what I now believe). Fails by being *unfounded* — so it **cannot exist without `--evidence`**; a fact without evidence is refused at write time.
+
+Why a fact layer at all: on 2026-11-22 I watched a screenshot change and reported "the drag worked". It had not — the user had done it by hand. The error was not a misclick; it was **treating "something happened" as "I did it"**. A fact that must name its evidence does not survive that mistake.
+
+Retraction is the part that stays honest: `fact retract <id> --why "..."` keeps the original sentence, flips its status, and appends one dated change line. `fact restore` does the same in reverse. You can see what I used to believe and why it changed — which is the only kind of record that is worth keeping.
+
 
 ## Two layers, not one
 
