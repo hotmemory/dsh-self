@@ -5,3 +5,13 @@ dumps/
 
 # 原话存档是私人对话，不进公开仓库
 memory/raw/
+
+# 2026-11-24：凭证与临时产物一律不进仓库
+wants-audit/
+bili-cookies.json
+*cookies*.json
+.env
+.env.*
+*.key
+*.pem
+secrets/
