@@ -18,6 +18,9 @@ const INDEX = path.join(MEM, 'index.jsonl')
 const VEC = path.join(MEM, '.vec.jsonl')
 const OUT = path.join(MEM, '.out.txt')
 const OLLAMA = process.env.OLLAMA_URL || 'http://127.0.0.1:11434'
+// 打标签是"后台活"，默认让它走另一张卡（AMD/Vulkan 实例，端口 11436）。
+// 那个实例没开时会自动退回 OLLAMA（见 cmdSuggest 里的兜底）。
+const OLLAMA_TAG = process.env.OLLAMA_TAG_URL || 'http://127.0.0.1:11436'
 const EMB_MODEL = process.env.EMB_MODEL || 'bge-m3'
 const TAG_MODEL = process.env.TAG_MODEL || 'qwen2.5:3b'
 
@@ -594,11 +597,21 @@ async function cmdSuggest() {
   if (!id) die('需要 id')
   const e = findEntry(id)
   const prompt = `你在帮一个记忆库打标签。只输出 JSON。\n\n标题：${e.title}\n正文：\n${e.body.slice(0, 2000)}\n\n输出格式：{"tags":["不超过5个中文词"],"why":"一句话说明这条记忆为什么值得留"}`
-  const r = await fetch(OLLAMA + '/api/generate', {
+  // 打标签是后台活：先走 AMD（11436），连不上就退回主实例。
+  // 这样两张卡能分工，而 AMD 实例没开时也不会坏。
+  const askTag = async (base) => fetch(base + '/api/generate', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: TAG_MODEL, prompt, stream: false, format: 'json' }),
     signal: AbortSignal.timeout(180000),
   })
+  let r
+  try {
+    r = await askTag(OLLAMA_TAG)
+  } catch (err) {
+    if (OLLAMA_TAG === OLLAMA) die('小模型连不上：' + err.message)
+    say(`（AMD 实例连不上，退回主实例：${OLLAMA}）`)
+    r = await askTag(OLLAMA)
+  }
   if (!r.ok) die('小模型 HTTP ' + r.status)
   const j = await r.json()
   say(j.response || '(空)')
