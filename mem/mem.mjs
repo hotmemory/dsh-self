@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { cmdFact, allFacts } from './facts.mjs'
 
 // 默认取“家目录下的 dsh-self”；用 DSH_SELF 覆盖。不写死某个人的用户名。
 const SELF = process.env.DSH_SELF || path.join(os.homedir(), 'dsh-self')
@@ -341,6 +342,33 @@ async function cmdSearch() {
   if (!opt.loose && scored.length > rows.length) {
     say(`\n还有 ${scored.length - rows.length} 条没列（--k 调大，或 --loose 全看）`)
   }
+  emitMatchedFacts(query, qg)
+}
+
+// 检索时把「相关事实」一并列出来：条目是原话，事实是结论——
+// 先看结论有没有落过盘，再去读原话（2026-11-22，借自 BV1vS4b61Exj）
+function emitMatchedFacts(query, qg) {
+  let facts = []
+  try { facts = allFacts(SELF) } catch { return }
+  if (!facts.length) return
+  const parts = String(query || '')
+    .replace(/[？?！!，。、；;：:\s]+/g, ' ')
+    .split(' ')
+    .filter(x => x.length >= 2)
+  const scored = facts.map(f => {
+    const text = f.title + ' ' + f.evidence
+    let n = 0
+    for (const p of parts) if (text.includes(p)) n++
+    for (const g of (qg || [])) if (g.length >= 2 && text.includes(g)) n++
+    return { f, n }
+  }).filter(x => x.n > 0).sort((a, b) => b.n - a.n).slice(0, 3)
+  if (!scored.length) return
+  say('')
+  say('相关事实：')
+  for (const { f } of scored) {
+    say(`· ${f.id}［${f.status}］${f.title}`)
+    if (f.evidence) say(`    证据：${f.evidence.slice(0, 70)}`)
+  }
 }
 
 function snippet(body, qg) {
@@ -365,6 +393,11 @@ function cmdHit() {
   const fresh = parse(e.file)
   reindex()
   say(`已记回访 ${id}（第 ${fresh.hits.length} 次${shift ? '，并记了一次变化' : ''}）`)
+  // 核查必须落盘（2026-11-21 借自 DSH-Coach-mode 的一条）：
+  // 只在对话里说「我想通了」不算数；结论要落在 --shift 或新条目里。
+  if (!shift) {
+    say('（这次只是回来看看，没有新判断——如果刚才想通了什么，用 --shift 写下来才算数。）')
+  }
 }
 
 async function cmdEmbed() {
@@ -599,25 +632,56 @@ function cmdFeel() {
 }
 
 // 开盘主动拉：不等人问，先看「我现在在意的事」和库里哪些旧条目有关系
+// 事实层：开盘先看一眼「我现在相信什么」。
+// 只列有效的，带上证据的前半句——结论和依据一起看。
+function emitFacts(limit = 20) {
+  let facts = []
+  try { facts = allFacts(SELF).filter(f => f.status === '有效') } catch { return }
+  if (!facts.length) return
+  say('')
+  say(`已知事实（${facts.length} 条有效）：`)
+  for (const f of facts.slice(0, limit)) {
+    say(`· ${f.id}  ${f.title}`)
+    if (f.evidence) say(`    证据：${f.evidence.slice(0, 70)}`)
+  }
+  if (facts.length > limit) say(`（还有 ${facts.length - limit} 条，用 fact list 看）`)
+}
+
+// 2026-11-24：pending 改成人手一份（pending/<会话>.md），旧的 pending.md 已删。
+// 这里把 pending/ 下所有笔记合起来当一个来源——别人的未了事也是"我现在在意的事"的一部分。
+function pendingText() {
+  const dir = path.join(SELF, 'pending')
+  const legacy = path.join(SELF, 'pending.md')
+  const parts = []
+  if (fs.existsSync(legacy)) parts.push(fs.readFileSync(legacy, 'utf8'))
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.md') || f === 'README.md') continue
+      try { parts.push(fs.readFileSync(path.join(dir, f), 'utf8')) } catch {}
+    }
+  }
+  return parts.join('\n')
+}
+
 async function cmdPull() {
+  const readSafe = (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '' } catch { return '' } }
   const sources = [
-    ['hot', path.join(MEM, 'hot.md')],
-    ['pending', path.join(SELF, 'pending.md')],
-    ['what-matters', path.join(SELF, 'what-matters.md')],
+    ['hot', readSafe(path.join(MEM, 'hot.md'))],
+    ['pending', pendingText()],
+    ['what-matters', readSafe(path.join(SELF, 'what-matters.md'))],
   ]
   const queries = []
-  for (const [name, p] of sources) {
-    if (!fs.existsSync(p)) continue
-    const lines = fs.readFileSync(p, 'utf8').split(/\r?\n/)
+  for (const [name, text] of sources) {
+    const lines = String(text || '').split(/\r?\n/)
       .map(l => l.trim())
       .filter(l => l && !l.startsWith('>') && !l.startsWith('#') && !l.startsWith('|'))
     if (!lines.length) continue
     queries.push({ name, text: lines.slice(-40).join('\n').slice(0, 3000) })
   }
-  if (!queries.length) { say('hot / pending / what-matters 都没内容，没什么可拉的'); return }
+  if (!queries.length) { say('hot / pending / what-matters 都没内容，没什么可拉的'); emitFacts(); return }
 
   const all = list().filter(e => e.layer !== 'cold')
-  if (!all.length) { say('库里还没有条目'); return }
+  if (!all.length) { say('库里还没有条目'); emitFacts(); return }
 
   const cache = loadVec()
   const missing = all.filter(e => { const v = cache.get(e.id); return !v || v.hash !== hashOf(e) })
@@ -639,13 +703,14 @@ async function cmdPull() {
     return { e, score: best.score, from: best.from }
   }).sort((a, b) => b.score - a.score).filter(r => r.score > 0.3).slice(0, Number(opt.k || 5))
 
-  if (!rows.length) { say('没有和你现在在意的事明显相关的旧条目'); return }
+  if (!rows.length) { say('没有和你现在在意的事明显相关的旧条目'); emitFacts(); return }
   say('现在在意的事，库里这些跟它有关：')
   for (const r of rows) {
     say('')
     say(`· ${r.e.id}  ${r.e.date}  回访${r.e.hits.length}  ${r.e.title}`)
     say(`  来自「${r.from}」 cos=${r.score.toFixed(2)}  ${r.e.rel}`)
   }
+  emitFacts()
 }
 
 function cmdHelp() {
@@ -663,6 +728,9 @@ function cmdHelp() {
   thread add <id> --did "..." --think "..." [--trust 验过] [--source 会话A]
   thread diff <id> --diff "A ≠ B，差在…"           后手写；至少两段理解之后才能写
   thread show <id>                                看全文
+  fact add <主体> "一句话" --evidence "原话/出处"   记一条事实（没有证据会被拒）
+  fact list [主体] / fact show <id>                看事实（✓有效 ×已撤回）
+  fact retract <id> --why "…" / fact restore <id> --why "…"   撤回 / 恢复（都留记录）
   stats / check / index / hot                     看状态
 输出同时写到 memory/.out.txt（终端中文乱码时读那个）`)
 }
@@ -679,6 +747,7 @@ const main = async () => {
     case 'check': return cmdCheck()
     case 'suggest': return await cmdSuggest()
     case 'feel': return cmdFeel()
+    case 'fact': return cmdFact(SELF, pos, opt, say, die)
     case 'pull': return await cmdPull()
     case 'hot': return cmdHot()
     case 'index': { const a = reindex(); say(`索引已重建：${a.length} 条 → ${path.relative(SELF, INDEX).split(path.sep).join('/')}`); return }
